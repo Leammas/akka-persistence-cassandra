@@ -282,10 +282,11 @@ import java.util.concurrent.ThreadLocalRandom
         onErrorThenStop(new IllegalStateException(errMsg))
       } else {
         // This is useful when debugging but too much logging to have enabled by default
-        // if (log.isDebugEnabled)
-        //   log.debug(
-        //     s"${backtrackingLog}got event for tag [{}] from pid [{}] with seqNr [{}] and offset [{}], buffered [${buf.size}]",
-        //     tag, env.persistentRepr.persistenceId, env.persistentRepr.sequenceNr, formatOffset(env.offset))
+        if (log.isDebugEnabled)
+          log.debug(
+            s"${backtrackingLog}got event for tag [{}] from pid [{}] with seqNr [{}] and offset [{}], buffered [${buf.size}], demand [$totalDemand]",
+            tag, env.persistentRepr.persistenceId, env.persistentRepr.sequenceNr, formatOffset(env.offset)
+          )
 
         deliverBuf()
       }

@@ -4,10 +4,7 @@
 package akka.persistence.cassandra.query
 
 import java.nio.ByteBuffer
-import java.time.LocalDate
-import java.time.LocalDateTime
-import java.time.ZoneId
-import java.time.ZoneOffset
+import java.time._
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 
@@ -23,7 +20,7 @@ import akka.persistence.cassandra.query.scaladsl.CassandraReadJournal
 import akka.persistence.cassandra.testkit.CassandraLauncher
 import akka.persistence.journal.Tagged
 import akka.persistence.journal.WriteEventAdapter
-import akka.persistence.query.{ EventEnvelope, NoOffset, PersistenceQuery }
+import akka.persistence.query._
 import akka.persistence.query.scaladsl.{ CurrentEventsByTagQuery, EventsByTagQuery }
 import akka.serialization.{ SerializationExtension, SerializerWithStringManifest }
 import akka.stream.ActorMaterializer
@@ -38,9 +35,9 @@ import org.scalatest.WordSpecLike
 
 import scala.concurrent.Await
 import com.typesafe.config.Config
-import akka.persistence.query.TimeBasedUUID
 import akka.testkit.TestProbe
 import akka.event.Logging.Warning
+import akka.stream.scaladsl.Sink
 import org.scalatest.BeforeAndAfterEach
 
 object EventsByTagSpec {
@@ -108,6 +105,12 @@ object EventsByTagSpec {
   val strictConfigFirstOffset1001DaysAgo = ConfigFactory.parseString(s"""
     cassandra-query-journal.first-time-bucket = ${TimeBucket(today.minusDays(1001)).key}
     """).withFallback(strictConfig)
+
+  val strictConfigSmallBuffer = ConfigFactory.parseString(s"""
+    akka.loglevel = DEBUG
+    cassandra-query-journal.first-time-bucket = "20170911"
+    cassandra-query-journal.max-buffer-size = 50
+    """).withFallback(strictConfig)
 }
 
 class ColorFruitTagger extends WriteEventAdapter {
@@ -169,7 +172,10 @@ abstract class AbstractEventsByTagSpec(override val systemName: String, config: 
     session.prepare(writeStatements.writeMessage(withMeta = false))
   }
 
-  def writeTestEvent(time: LocalDateTime, persistent: PersistentRepr, tags: Set[String]): Unit = {
+  def writeTestEvent(time: LocalDateTime, persistent: PersistentRepr, tags: Set[String]): Unit =
+    writeTestEvent(time.toInstant(ZoneOffset.UTC), persistent, tags)
+
+  def writeTestEvent(time: Instant, persistent: PersistentRepr, tags: Set[String]): Unit = {
     val event = persistent.payload.asInstanceOf[AnyRef]
     val serializer = serialization.findSerializerFor(event)
     val serialized = ByteBuffer.wrap(serialization.serialize(event).get)
@@ -182,7 +188,7 @@ abstract class AbstractEventsByTagSpec(override val systemName: String, config: 
         else PersistentRepr.Undefined
     }
 
-    val timestamp = time.toInstant(ZoneOffset.UTC).toEpochMilli
+    val timestamp = time.toEpochMilli
 
     val bs = preparedWriteMessage.bind()
     bs.setString("persistence_id", persistent.persistenceId)
@@ -1395,3 +1401,23 @@ class EventsByTagStrictBySeqMemoryIssueSpec
   }
 }
 
+class EventsByTagStrictBySeqZeroDemandIssueSpec
+  extends AbstractEventsByTagSpec("EventsByTagStrictBySeqZeroDemandIssueSpec", EventsByTagSpec.strictConfigSmallBuffer) {
+
+  "read journal from arbitrary offset with small buffer" in {
+    val w1 = UUID.randomUUID().toString
+    scala.io.Source.fromFile("core/src/test/resources/fixtures/wrong-missing-seq-num.csv").getLines().foreach { line =>
+      val split = line.split(',')
+      val (offset, persistenceId, seqNum) = (split(0), split(1), split(2).toInt)
+      val uuid = UUID.fromString(offset)
+      val millis = UUIDs.unixTimestamp(uuid)
+      val timestamp = Instant.ofEpochMilli(millis)
+      val persistentRepr = PersistentRepr("", seqNum.toLong, persistenceId, "", writerUuid = w1)
+      writeTestEvent(timestamp, persistentRepr, Set("T5"))
+    }
+
+    val src = queries.currentEventsByTag(tag = "T5", offset = Offset.timeBasedUUID(UUID.fromString("5a2aac00-9785-11e7-a259-aba2283a45b2")))
+    val result = src.runWith(Sink.ignore)
+    noException should be thrownBy Await.result(result, scala.concurrent.duration.Duration.Inf)
+  }
+}
